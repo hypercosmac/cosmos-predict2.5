@@ -14,6 +14,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# MPS compatibility: set before torch is imported.
+# 1) PYTORCH_ENABLE_MPS_FALLBACK — the UniPC scheduler uses torch.linalg.solve
+#    which is not yet implemented on MPS; this makes PyTorch fall back to CPU.
+# 2) PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.0 — disable the hard memory ceiling so
+#    large allocations can spill into system swap instead of crashing.
+import os as _os
+_os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+_os.environ.setdefault("PYTORCH_MPS_HIGH_WATERMARK_RATIO", "0.0")
+_os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
 """
 Hyperrealistic World Model Demo
 ================================
@@ -497,7 +507,16 @@ def load_pipeline(
             _cpmod.CosmosSafetyChecker = _orig_checker
 
     if not offload:
-        pipe = pipe.to(device)
+        if device == "mps":
+            # MPS has limited unified memory (~30 GB on most Macs).
+            # enable_model_cpu_offload moves each sub-model (text_encoder,
+            # transformer, vae) to the accelerator only during its forward
+            # pass, keeping the rest on CPU. This prevents OOM while being
+            # faster than full sequential offload.
+            print("Enabling model CPU offload for MPS to avoid OOM...")
+            pipe.enable_model_cpu_offload(device=device)
+        else:
+            pipe = pipe.to(device)
 
     print("Model loaded.")
     return pipe
@@ -636,10 +655,6 @@ def build_gradio_app(pipe):
 
     with gr.Blocks(
         title="Cosmos-Predict2.5 Hyperrealistic World Demo",
-        theme=gr.themes.Base(
-            primary_hue="blue",
-            neutral_hue="slate",
-        ),
     ) as app:
         gr.Markdown(
             "# Cosmos-Predict2.5 -- Hyperrealistic World Model Demo\n"
